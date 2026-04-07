@@ -5,6 +5,9 @@
 .env.test.local
 .env.production.local
 .env.*
+!*.example
+!*.sample
+!*.template
 
 # OS generated files
 .DS_Store
