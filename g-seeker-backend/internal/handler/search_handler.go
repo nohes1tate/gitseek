@@ -35,7 +35,7 @@ func (h *SearchHandler) Search(c *gin.Context) {
 		}
 	}
 
-	repos, err := h.recommendService.Recommend(c.Request.Context(), query, limit)
+	result, err := h.recommendService.Recommend(c.Request.Context(), query, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"message": "search failed",
@@ -46,6 +46,11 @@ func (h *SearchHandler) Search(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "success",
-		"data":    repos,
+		"data":    result.Items,
+		"meta": gin.H{
+			"original_query":  result.OriginalQuery,
+			"rewritten_query": result.RewrittenQuery,
+			"candidate_count": result.CandidateCount,
+		},
 	})
 }
