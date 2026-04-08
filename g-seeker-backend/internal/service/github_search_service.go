@@ -52,8 +52,25 @@ func buildGitHubQuery(userQuery string) string {
 		return "stars:>100"
 	}
 
-	// MVP 阶段先做简单 query rewrite
-	return fmt.Sprintf("%s stars:>50", q)
+	keywords := tokenizeSearchText(q)
+	if len(keywords) == 0 {
+		return "stars:>100"
+	}
+
+	parts := make([]string, 0, len(keywords)+2)
+	parts = append(parts, keywords...)
+
+	// 关键词少时适当提高 stars 门槛，避免泛召回
+	switch {
+	case len(keywords) <= 2:
+		parts = append(parts, "stars:>80")
+	case len(keywords) <= 4:
+		parts = append(parts, "stars:>30")
+	default:
+		parts = append(parts, "stars:>10")
+	}
+
+	return strings.Join(parts, " ")
 }
 
 func buildReason(item client.GitHubRepoItem) string {

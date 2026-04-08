@@ -6,7 +6,11 @@ import (
 	"sort"
 	"strings"
 
+	"g-seeker-backend/internal/llm"
 	"g-seeker-backend/internal/model"
+	"g-seeker-backend/internal/prompt"
+
+	"github.com/cloudwego/eino/schema"
 )
 
 type RecommendResult struct {
@@ -19,15 +23,18 @@ type RecommendResult struct {
 type RecommendService struct {
 	githubSearchService *GitHubSearchService
 	rewriteService      *QueryRewriteService
+	llmClient           llm.Client
 }
 
 func NewRecommendService(
 	githubSearchService *GitHubSearchService,
 	rewriteService *QueryRewriteService,
+	llmClient llm.Client,
 ) *RecommendService {
 	return &RecommendService{
 		githubSearchService: githubSearchService,
 		rewriteService:      rewriteService,
+		llmClient:           llmClient,
 	}
 }
 
@@ -64,7 +71,12 @@ func (s *RecommendService) Recommend(ctx context.Context, query string, limit in
 	}
 
 	for i := range ranked {
-		ranked[i].Reason = buildRecommendationReason(query, rewriteResult.Query, ranked[i])
+		ranked[i].Reason = s.buildRecommendationReasonWithFallback(
+			ctx,
+			query,
+			rewriteResult.Query,
+			ranked[i],
+		)
 	}
 
 	return &RecommendResult{
@@ -112,16 +124,24 @@ func rankRepos(originalQuery, rewrittenQuery string, repos []model.Repo) []model
 }
 
 func calculateRepoScore(repo model.Repo, keywords []string) float64 {
-	text := strings.ToLower(repo.Name + " " + repo.Description)
+	nameText := strings.ToLower(repo.Name)
+	descText := strings.ToLower(repo.Description)
+	fullText := nameText + " " + descText
 
 	matchCount := 0
+	nameMatchCount := 0
+
 	for _, kw := range keywords {
-		if strings.Contains(text, kw) {
+		if strings.Contains(fullText, kw) {
 			matchCount++
+		}
+		if strings.Contains(nameText, kw) {
+			nameMatchCount++
 		}
 	}
 
-	score := float64(matchCount) * 10
+	score := float64(matchCount) * 8
+	score += float64(nameMatchCount) * 6
 
 	switch {
 	case repo.Stars >= 50000:
@@ -137,17 +157,85 @@ func calculateRepoScore(repo model.Repo, keywords []string) float64 {
 	}
 
 	if repo.Description != "" {
-		score += 1
+		score += 1.5
 	}
 
-	if strings.Contains(strings.ToLower(repo.Name), "awesome") {
+	lowerName := strings.ToLower(repo.Name)
+	lowerDesc := strings.ToLower(repo.Description)
+
+	if strings.Contains(lowerName, "awesome") {
+		score -= 3
+	}
+	if strings.Contains(lowerName, "example") || strings.Contains(lowerDesc, "example") {
+		score -= 2
+	}
+	if strings.Contains(lowerName, "demo") || strings.Contains(lowerDesc, "demo") {
+		score -= 2
+	}
+	if strings.Contains(lowerName, "tutorial") || strings.Contains(lowerDesc, "tutorial") {
 		score -= 2
 	}
 
 	return score
 }
 
-func buildRecommendationReason(originalQuery, rewrittenQuery string, repo model.Repo) string {
+func (s *RecommendService) buildRecommendationReasonWithFallback(
+	ctx context.Context,
+	originalQuery string,
+	rewrittenQuery string,
+	repo model.Repo,
+) string {
+	if s.llmClient != nil {
+		reason, err := s.generateRecommendationReason(ctx, originalQuery, rewrittenQuery, repo)
+		if err == nil && strings.TrimSpace(reason) != "" {
+			return reason
+		}
+	}
+
+	return buildRecommendationReasonFallback(originalQuery, rewrittenQuery, repo)
+}
+
+func (s *RecommendService) generateRecommendationReason(
+	ctx context.Context,
+	originalQuery string,
+	rewrittenQuery string,
+	repo model.Repo,
+) (string, error) {
+	messages := []*schema.Message{
+		{
+			Role:    schema.System,
+			Content: prompt.RepoReasonSystemPrompt,
+		},
+		{
+			Role: schema.User,
+			Content: prompt.BuildRepoReasonUserPrompt(
+				originalQuery,
+				rewrittenQuery,
+				repo.Name,
+				repo.Owner,
+				repo.Description,
+				repo.Stars,
+				repo.URL,
+			),
+		},
+	}
+
+	return s.llmClient.Generate(ctx, messages)
+}
+
+// func sanitizeReason(s string) string {
+// 	s = strings.TrimSpace(s)
+// 	s = strings.Trim(s, `"'`)
+// 	s = strings.ReplaceAll(s, "\n", "")
+// 	s = strings.Join(strings.Fields(s), " ")
+// 	if len(s) > 120 {
+// 		s = s[:120]
+// 		s = strings.TrimSpace(s)
+// 	}
+// 	return s
+// }
+
+func buildRecommendationReasonFallback(originalQuery, rewrittenQuery string, repo model.Repo) string {
 	keywords := uniqueStrings(append(
 		tokenizeSearchText(originalQuery),
 		tokenizeSearchText(rewrittenQuery)...,

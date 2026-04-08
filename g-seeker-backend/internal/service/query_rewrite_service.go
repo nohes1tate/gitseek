@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"g-seeker-backend/internal/llm"
+	"g-seeker-backend/internal/prompt"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -48,36 +49,20 @@ func (s *QueryRewriteService) Rewrite(ctx context.Context, userQuery string) (*R
 		return result, nil
 	}
 
-	systemPrompt := `You are a GitHub repository search query rewriter.
-Convert a user's natural language software requirement into a concise GitHub search query.
-
-Rules:
-1. Output English only.
-2. Output one single line only.
-3. Keep it short and searchable.
-4. Include language/framework/domain keywords when helpful.
-5. Do not explain anything.
-6. Do not wrap with quotes or markdown.
-7. Prefer keyword style, not sentence style.`
-
-	userPrompt := fmt.Sprintf("User requirement: %s", userQuery)
-
-	fmt.Printf("[rewrite] calling llm...\n")
-
 	messages := []*schema.Message{
 		{
 			Role:    schema.System,
-			Content: systemPrompt,
+			Content: prompt.SearchRewriteSystemPrompt,
 		},
 		{
 			Role:    schema.User,
-			Content: userPrompt,
+			Content: prompt.BuildSearchRewriteUserPrompt(userQuery),
 		},
 	}
 
-	rewritten, err := s.llmClient.Generate(ctx, messages)
+	fmt.Printf("[rewrite] calling llm...\n")
 
-	// rewritten, err := s.llmClient.Generate(ctx, systemPrompt, userPrompt)
+	rewritten, err := s.llmClient.Generate(ctx, messages)
 	if err != nil {
 		fmt.Printf("[rewrite] llm error: %v\n", err)
 		return result, nil
@@ -86,7 +71,8 @@ Rules:
 	fmt.Printf("[rewrite] raw llm output: %s\n", rewritten)
 
 	rewritten = sanitizeGeneratedQuery(rewritten)
-	if rewritten == "" {
+	if !isGoodRewrite(rewritten) {
+		fmt.Printf("[rewrite] invalid llm rewrite, fallback used\n")
 		return result, nil
 	}
 
@@ -103,6 +89,12 @@ func sanitizeGeneratedQuery(s string) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.Join(strings.Fields(s), " ")
 
+	// 去掉常见的前缀污染
+	s = strings.TrimPrefix(strings.ToLower(s), "output: ")
+	s = strings.TrimPrefix(s, "query: ")
+	s = strings.TrimPrefix(s, "github query: ")
+	s = strings.TrimSpace(s)
+
 	if len(s) > 120 {
 		s = s[:120]
 		s = strings.TrimSpace(s)
@@ -110,10 +102,31 @@ func sanitizeGeneratedQuery(s string) string {
 	return s
 }
 
+func isGoodRewrite(s string) bool {
+	if s == "" {
+		return false
+	}
+
+	if strings.Contains(s, "{") || strings.Contains(s, "}") {
+		return false
+	}
+
+	if len(strings.Fields(s)) > 12 {
+		return false
+	}
+
+	keywords := tokenizeSearchText(s)
+	if len(keywords) == 0 {
+		return false
+	}
+
+	return true
+}
+
 func ruleBasedRewrite(q string) string {
 	raw := strings.ToLower(strings.TrimSpace(q))
 
-	parts := make([]string, 0, 6)
+	parts := make([]string, 0, 8)
 
 	if hasAny(raw, "go", "golang") {
 		parts = append(parts, "golang")
@@ -131,11 +144,11 @@ func ruleBasedRewrite(q string) string {
 
 	switch {
 	case hasAny(raw, "权限", "鉴权", "认证", "授权", "rbac", "auth", "oauth", "access control", "authorization", "authentication"):
-		parts = append(parts, "authorization", "authentication", "rbac")
+		parts = append(parts, "rbac", "authorization", "authentication")
 	case hasAny(raw, "工作流", "workflow", "orchestration", "dag"):
-		parts = append(parts, "workflow", "engine", "orchestration")
+		parts = append(parts, "workflow", "orchestration", "engine")
 	case hasAny(raw, "消息队列", "mq", "message queue", "pubsub", "pub sub", "kafka", "rabbitmq"):
-		parts = append(parts, "message", "queue", "client")
+		parts = append(parts, "message", "queue", "worker")
 	case hasAny(raw, "日志", "logger", "logging", "log"):
 		parts = append(parts, "logging", "logger")
 	case hasAny(raw, "配置", "config", "configuration"):
@@ -148,6 +161,10 @@ func ruleBasedRewrite(q string) string {
 		parts = append(parts, "orm", "database")
 	case hasAny(raw, "缓存", "cache", "redis"):
 		parts = append(parts, "cache", "redis")
+	case hasAny(raw, "推荐", "recommend", "recommender", "ranking"):
+		parts = append(parts, "recommendation", "ranking")
+	case hasAny(raw, "llm", "agent", "rag", "embedding", "向量", "知识库"):
+		parts = append(parts, "llm", "rag", "retrieval")
 	default:
 		parts = append(parts, tokenizeSearchText(q)...)
 	}
@@ -155,6 +172,10 @@ func ruleBasedRewrite(q string) string {
 	parts = uniqueStrings(parts)
 	if len(parts) == 0 {
 		return q
+	}
+
+	if len(parts) > 8 {
+		parts = parts[:8]
 	}
 
 	return strings.Join(parts, " ")
@@ -192,6 +213,7 @@ func tokenizeSearchText(s string) []string {
 		"and": {}, "or": {}, "with": {}, "in": {}, "on": {}, "by": {},
 		"is": {}, "are": {}, "repo": {}, "github": {}, "library": {},
 		"project": {}, "tool": {}, "tools": {}, "best": {}, "help": {},
+		"want": {}, "need": {}, "find": {}, "looking": {}, "search": {},
 	}
 
 	out := make([]string, 0, len(items))

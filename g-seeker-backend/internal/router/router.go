@@ -25,7 +25,7 @@ func RegisterRoutes(r *gin.Engine) {
 	}
 
 	rewriteService := service.NewQueryRewriteService(llmClient)
-	recommendService := service.NewRecommendService(githubSearchService, rewriteService)
+	recommendService := service.NewRecommendService(githubSearchService, rewriteService, llmClient)
 	searchHandler := handler.NewSearchHandler(recommendService)
 
 	api := r.Group("/api")
